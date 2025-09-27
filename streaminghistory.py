@@ -52,5 +52,4 @@ if __name__ == "__main__":
     folder_path = "streaminghistory"  # <-- change this to your folder path
     data = load_spotify_data(folder_path)
     counter = count_song_plays(data)
-    print(len(counter)) # the number of distinct songs
-    # plot_top_songs(counter, top_n=50)
+    plot_top_songs(counter, top_n=50)
