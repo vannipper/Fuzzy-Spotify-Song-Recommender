@@ -1,146 +1,96 @@
-# minimal_spotify_playlist.py
-import os
+# Prelim 1
+# Written by Van Nipper
+
+import pandas as pd
 import json
-import time
-import base64
-import dotenv
-from requests import post, get
-from flask import Flask, request
-from threading import Thread
+import glob
+from sklearn.preprocessing import MinMaxScaler
+import kagglehub
+from kagglehub import KaggleDatasetAdapter
 
-# Load environment variables
-dotenv.load_dotenv()
-CLIENT_ID = os.getenv("CLIENT_ID")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-REDIRECT_URI = "http://127.0.0.1:5000/callback"
-SCOPES = "user-library-read"
+# Load spotify csv data from Kaggle
+df = kagglehub.dataset_load(
+    KaggleDatasetAdapter.PANDAS,
+    "maharshipandya/-spotify-tracks-dataset",
+    path="dataset.csv"
+)
+print(f"Dataset loaded. {len(df)} songs are available.")
 
-app = Flask(__name__)
-user_token = None  # Will be set after login
+# Define features
+numeric_features = [
+    "danceability",
+    "energy",
+    "valence",
+    "acousticness",
+    "instrumentalness",
+    "liveness",
+    "speechiness",
+    "tempo"
+]
 
-# ------------------ Spotify Auth ------------------
-def login_url():
-    url = (
-        "https://accounts.spotify.com/authorize"
-        f"?client_id={CLIENT_ID}"
-        f"&response_type=code"
-        f"&redirect_uri={REDIRECT_URI}"
-        f"&scope={SCOPES}"
-    )
-    return url
+# Get rid of unnecessary data
+df = df.dropna(subset=numeric_features + ["track_name", "artists"]) 
+scaler = MinMaxScaler()
+df[numeric_features] = scaler.fit_transform(df[numeric_features])
 
-def exchange_code_for_token(code):
-    url = "https://accounts.spotify.com/api/token"
-    headers = {
-        "Authorization": "Basic " + base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
-    }
-    data = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": REDIRECT_URI
-    }
-    response = post(url, headers=headers, data=data)
-    return response.json().get("access_token")
+# Load user's streaming history from JSON files (local)
+user_tracks = set()
+for file in glob.glob("./streaminghistory/*.json"):
+    with open(file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+        for entry in data:
+            track_name = entry.get("trackName", "").lower()
+            artist = entry.get("artistName", "").split(";")[0].lower()
+            if track_name and artist:
+                user_tracks.add((track_name, artist))
 
-@app.route("/callback")
-def callback():
-    global user_token
-    code = request.args.get("code")
-    user_token = exchange_code_for_token(code)
-    return "Login successful! You can return to your terminal."
+# Remove all songs from the dataset that the user hasn't listened to
+def in_user_history(row):
+    track_name = str(row["track_name"]).lower() if pd.notnull(row["track_name"]) else ''
+    artist = str(row["artists"]).split(";")[0].lower() if pd.notnull(row["artists"]) else ''
+    return (track_name, artist) in user_tracks
 
-# ------------------ Spotify Data ------------------
-def get_saved_tracks(token, limit=50):
-    tracks = []
-    url = f"https://api.spotify.com/v1/me/tracks?limit={limit}"
-    headers = {"Authorization": f"Bearer {token}"}
-    while url:
-        r = get(url, headers=headers).json()
-        for item in r.get("items", []):
-            track = item["track"]
-            tracks.append({
-                "id": track["id"],
-                "name": track["name"],
-                "artist": track["artists"][0]["name"]
-            })
-        url = r.get("next")
-    return tracks
+df = df[df.apply(in_user_history, axis=1)]
+print(f"{len(df)} songs remain after filtering.")
 
-def get_audio_features(token, track_ids):
-    headers = {"Authorization": f"Bearer {token}"}
-    features = []
-    for i in range(0, len(track_ids), 100):  # batch max 100 IDs
-        batch_ids = track_ids[i:i+100]
-        url = f"https://api.spotify.com/v1/audio-features?ids={','.join(batch_ids)}"
-        r = get(url, headers=headers)
-        try:
-            data = r.json()
-        except Exception:
-            print(f"Failed to decode JSON for batch {i}-{i+len(batch_ids)}: {r.text}")
-            continue
-        batch_features = data.get("audio_features", [])
-        # Skip None tracks
-        features.extend([f for f in batch_features if f])
-        time.sleep(0.1)  # avoid rate limits
-    return features
+# Exist if no matching tracks are found
+if df.empty:
+    print("No matching tracks found. Exiting.")
+    exit()
 
-# ------------------ Minimal Fuzzy Scoring ------------------
-def fuzzify(track):
-    v = track.get("valence", 0.5)
-    e = track.get("energy", 0.5)
-    return {
-        "valence_happy": max(0, (v-0.5)*2),
-        "valence_sad": max(0, (0.5-v)*2),
-        "energy_energetic": max(0, (e-0.5)*2),
-        "energy_calm": max(0, (0.5-e)*2)
-    }
+# Remove duplicate tracks
+df["artist_primary"] = df["artists"].apply(lambda x: str(x).split(";")[0].lower())
+df = df.drop_duplicates(subset=["track_name", "artist_primary"])
 
-MOOD_RULES = {
-    "happy": ["valence_happy", "energy_energetic"],
-    "sad": ["valence_sad", "energy_calm"]
+# Fuzzy mood matching definitions
+mood_targets = {
+    "happy": {"valence": 0.8, "energy": 0.8, "danceability": 0.7},
+    "sad": {"valence": 0.2, "energy": 0.3, "acousticness": 0.6},
+    "chill": {"valence": 0.5, "energy": 0.4, "instrumentalness": 0.5},
+    "party": {"valence": 0.7, "energy": 0.9, "danceability": 0.9}
 }
 
-def score(track_fuzzy, mood):
-    features = MOOD_RULES[mood]
-    return sum(track_fuzzy[f] for f in features) / len(features)
+# Get target mood from user
+while True:
+    mood = input("\nEnter mood (happy/sad/chill/party): ").lower().strip()
+    if mood not in mood_targets:
+        print("Please choose from happy, sad, chill, or party.")
+    else:
+        break
+target = mood_targets[mood]
 
-# ------------------ MAIN ------------------
-if __name__ == "__main__":
-    print("1️⃣ Open this URL in your browser and log in:")
-    print(login_url())
-    print("\n2️⃣ After login, Spotify will redirect to your browser. Wait a few seconds...")
+# Perform fuzzy matching
+def mood_score(row, target_dict):
+    score = 0
+    for feature, value in target_dict.items():
+        score += (1 - abs(row[feature] - value))  # closer = better
+    return score / len(target_dict)
 
-    # Run Flask in background thread
-    Thread(target=lambda: app.run(port=5000)).start()
+df["mood_score"] = df.apply(lambda row: mood_score(row, target), axis=1)
 
-    # Wait for token
-    while not user_token:
-        time.sleep(1)
-
-    # Fetch saved tracks
-    tracks = get_saved_tracks(user_token)
-    track_ids = [t["id"] for t in tracks]
-
-    # Fetch audio features in batches
-    features_list = get_audio_features(user_token, track_ids)
-
-    # Compute fuzzy scores
-    fuzzy_tracks = [fuzzify(f) for f in features_list]
-    scored_tracks = list(zip(tracks, fuzzy_tracks))
-
-    # Prompt user for mood
-    while True:
-        mood = input("Enter mood (happy, sad): ").strip().lower()
-        if mood in MOOD_RULES:
-            break
-        print("Invalid mood.")
-
-    # Score and sort
-    scored_tracks.sort(key=lambda x: score(x[1], mood), reverse=True)
-
-    print(f"\nTop 10 tracks for mood '{mood}':")
-    for track, fuzzy in scored_tracks[:10]:
-        print(f"{track['artist']} - {track['name']} (score: {score(fuzzy, mood):.2f})")
-
-    print(f"Total saved tracks fetched: {len(tracks)}")
-    print(f"Tracks with audio features: {len(features_list)}")
+# Recommend top ten songs (10 song playlist)
+top_tracks = df.sort_values("mood_score", ascending=False).head(10)
+print(f"Top 10 tracks for mood '{mood}':\n")
+for i, row in enumerate(top_tracks.itertuples(), start=1):
+    print(f"{i}. {row.track_name} — {row.artists}  "
+          f"(Genre: {row.track_genre}, Score: {row.mood_score:.3f})")
