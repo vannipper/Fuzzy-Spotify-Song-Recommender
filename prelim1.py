@@ -1,141 +1,146 @@
-# Prelim results # 1
-# Written by Van Nipper
-
+# minimal_spotify_playlist.py
 import os
 import json
+import time
 import base64
 import dotenv
 from requests import post, get
+from flask import Flask, request
+from threading import Thread
 
-# Song class: contains artist and song name, overrides equals and hash
-class Song:
-    def __init__(self, aristName, songName, songId):
-        self.artistName = aristName
-        self.songName = songName
-        self.songId = songId
+# Load environment variables
+dotenv.load_dotenv()
+CLIENT_ID = os.getenv("CLIENT_ID")
+CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+REDIRECT_URI = "http://127.0.0.1:5000/callback"
+SCOPES = "user-library-read"
 
-    def __eq__(self, other):
-        return (self.songId == other.songId)
-    
-    def __hash__(self):
-        return hash(self.songId)
+app = Flask(__name__)
+user_token = None  # Will be set after login
 
-# Load spotify data
-def load_spotify_data(folder_path):
-    all_data = []
-    for file_name in os.listdir(folder_path):
-        if file_name.endswith(".json"):
-            file_path = os.path.join(folder_path, file_name)
-            with open(file_path, "r", encoding="utf-8") as f:
-                try:
-                    data = json.load(f)
-                    all_data.extend(data)
-                except json.JSONDecodeError:
-                    print(f"Skipping invalid JSON: {file_name}")
-    return all_data
+# ------------------ Spotify Auth ------------------
+def login_url():
+    url = (
+        "https://accounts.spotify.com/authorize"
+        f"?client_id={CLIENT_ID}"
+        f"&response_type=code"
+        f"&redirect_uri={REDIRECT_URI}"
+        f"&scope={SCOPES}"
+    )
+    return url
 
-# Get a hashSet of unique songs
-def get_spotify_song_list(data):
-    songList = []
-    for entry in data:
-        artistName = entry.get('artistName', '').strip()
-        songName = entry.get('trackName', '').strip()
-        songId = entry.get('songId', '').strip()
+def exchange_code_for_token(code):
+    url = "https://accounts.spotify.com/api/token"
+    headers = {
+        "Authorization": "Basic " + base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
+    }
+    data = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": REDIRECT_URI
+    }
+    response = post(url, headers=headers, data=data)
+    return response.json().get("access_token")
 
-        if (artistName.lower() != 'unknown arist' and songName.lower() != 'unknown track'):
-            songList.append(Song(artistName, songName, songId))
-    
-    return set(songList)
+@app.route("/callback")
+def callback():
+    global user_token
+    code = request.args.get("code")
+    user_token = exchange_code_for_token(code)
+    return "Login successful! You can return to your terminal."
 
-# Get API Token
-def get_token(client_id, client_secret):
-     headers = {
-          'Authorization' : 'Basic ' + str(base64.b64encode((client_id + ':' + client_secret).encode('utf-8')), 'utf-8'),
-          'Content-Type' : 'application/x-www-form-urlencoded'
-     }
-     data = {'grant_type' : 'client_credentials'}
+# ------------------ Spotify Data ------------------
+def get_saved_tracks(token, limit=50):
+    tracks = []
+    url = f"https://api.spotify.com/v1/me/tracks?limit={limit}"
+    headers = {"Authorization": f"Bearer {token}"}
+    while url:
+        r = get(url, headers=headers).json()
+        for item in r.get("items", []):
+            track = item["track"]
+            tracks.append({
+                "id": track["id"],
+                "name": track["name"],
+                "artist": track["artists"][0]["name"]
+            })
+        url = r.get("next")
+    return tracks
 
-     return json.loads(post('https://accounts.spotify.com/api/token', headers=headers, data=data).content)['access_token']
+def get_audio_features(token, track_ids):
+    headers = {"Authorization": f"Bearer {token}"}
+    features = []
+    for i in range(0, len(track_ids), 100):  # batch max 100 IDs
+        batch_ids = track_ids[i:i+100]
+        url = f"https://api.spotify.com/v1/audio-features?ids={','.join(batch_ids)}"
+        r = get(url, headers=headers)
+        try:
+            data = r.json()
+        except Exception:
+            print(f"Failed to decode JSON for batch {i}-{i+len(batch_ids)}: {r.text}")
+            continue
+        batch_features = data.get("audio_features", [])
+        # Skip None tracks
+        features.extend([f for f in batch_features if f])
+        time.sleep(0.1)  # avoid rate limits
+    return features
 
-# Get API Auth Header
-def get_auth_header(token):
-     return {'Authorization' : 'Bearer ' + token}
-
-def get_song_attributes(token, song):
-    pass
-
-# Returns a dictionary of fuzzified songs
-def fuzzify_song(song):
-    v = song["valence"]
-    e = song["energy"]
-    d = song["danceability"]
-    t = song["tempo"]
-    a = song["acousticness"]
-    instr = song["instrumentalness"]
-
+# ------------------ Minimal Fuzzy Scoring ------------------
+def fuzzify(track):
+    v = track.get("valence", 0.5)
+    e = track.get("energy", 0.5)
     return {
-        # Valence
-        "valence_sad": trap(v, 0.0, 0.0, 0.15, 0.35),
-        "valence_neutral": tri(v, 0.25, 0.5, 0.75),
-        "valence_happy": trap(v, 0.65, 0.85, 1.0, 1.0),
-
-        # Energy
-        "energy_calm": trap(e, 0.0, 0.0, 0.15, 0.35),
-        "energy_moderate": tri(e, 0.25, 0.5, 0.75),
-        "energy_energetic": trap(e, 0.65, 0.85, 1.0, 1.0),
-
-        # Danceability
-        "dance_low": trap(d, 0.0, 0.0, 0.2, 0.4),
-        "dance_medium": tri(d, 0.3, 0.5, 0.7),
-        "dance_high": trap(d, 0.6, 0.8, 1.0, 1.0),
-
-        # Tempo (BPM 50–200 typical)
-        "tempo_slow": trap(t, 50, 50, 70, 90),
-        "tempo_moderate": tri(t, 80, 100, 120),
-        "tempo_fast": trap(t, 110, 130, 200, 200),
-
-        # Acousticness
-        "acoustic_electronic": trap(a, 0.0, 0.0, 0.15, 0.35),
-        "acoustic_mixed": tri(a, 0.25, 0.5, 0.75),
-        "acoustic_acoustic": trap(a, 0.65, 0.85, 1.0, 1.0),
-
-        # Instrumentalness
-        "instr_vocal": trap(instr, 0.0, 0.0, 0.05, 0.2),
-        "instr_mixed": tri(instr, 0.15, 0.35, 0.6),
-        "instr_instrumental": trap(instr, 0.5, 0.7, 1.0, 1.0),
+        "valence_happy": max(0, (v-0.5)*2),
+        "valence_sad": max(0, (0.5-v)*2),
+        "energy_energetic": max(0, (e-0.5)*2),
+        "energy_calm": max(0, (0.5-e)*2)
     }
 
-# Membership functions
-def trap(x, a, b, c, d):
-    if x <= a or x >= d:
-        return 0.0
-    elif a < x < b:
-        return (x - a) / (b - a) if b != a else 1.0
-    elif b <= x <= c:
-        return 1.0
-    elif c < x < d:
-        return (d - x) / (d - c) if d != c else 1.0
-    return 0.0
+MOOD_RULES = {
+    "happy": ["valence_happy", "energy_energetic"],
+    "sad": ["valence_sad", "energy_calm"]
+}
 
-def tri(x, a, b, c):
-    if x <= a or x >= c:
-        return 0.0
-    elif a < x < b:
-        return (x - a) / (b - a) if b != a else 1.0
-    elif b <= x < c:
-        return (c - x) / (c - b) if c != b else 1.0
-    return 0.0
+def score(track_fuzzy, mood):
+    features = MOOD_RULES[mood]
+    return sum(track_fuzzy[f] for f in features) / len(features)
 
+# ------------------ MAIN ------------------
 if __name__ == "__main__":
-    load_dotenv()
-    client_id = os.getenv("CLIENT_ID")
-    client_secret = os.getenv("CLIENT_SECRET")
+    print("1️⃣ Open this URL in your browser and log in:")
+    print(login_url())
+    print("\n2️⃣ After login, Spotify will redirect to your browser. Wait a few seconds...")
 
-    token = get_token(client_id, client_secret)
+    # Run Flask in background thread
+    Thread(target=lambda: app.run(port=5000)).start()
 
-    my_data = load_spotify_data('streaminghistory')
-    my_songs = get_spotify_song_list(my_data)
+    # Wait for token
+    while not user_token:
+        time.sleep(1)
 
-    # GET SONG ATTRIBUTES HERE FROM SPOTIFY API
+    # Fetch saved tracks
+    tracks = get_saved_tracks(user_token)
+    track_ids = [t["id"] for t in tracks]
 
-    fuzzy_songs_list = list(map(fuzzify_song, my_songs))
+    # Fetch audio features in batches
+    features_list = get_audio_features(user_token, track_ids)
+
+    # Compute fuzzy scores
+    fuzzy_tracks = [fuzzify(f) for f in features_list]
+    scored_tracks = list(zip(tracks, fuzzy_tracks))
+
+    # Prompt user for mood
+    while True:
+        mood = input("Enter mood (happy, sad): ").strip().lower()
+        if mood in MOOD_RULES:
+            break
+        print("Invalid mood.")
+
+    # Score and sort
+    scored_tracks.sort(key=lambda x: score(x[1], mood), reverse=True)
+
+    print(f"\nTop 10 tracks for mood '{mood}':")
+    for track, fuzzy in scored_tracks[:10]:
+        print(f"{track['artist']} - {track['name']} (score: {score(fuzzy, mood):.2f})")
+
+    print(f"Total saved tracks fetched: {len(tracks)}")
+    print(f"Tracks with audio features: {len(features_list)}")
