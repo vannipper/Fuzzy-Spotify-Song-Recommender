@@ -64,7 +64,7 @@ df = df.drop_duplicates(subset=["track_name", "artist_primary"])
 
 # Fuzzy mood matching definitions
 mood_targets = {
-    "happy":          {"danceability": 0.8, "energy": 0.8, "valence": 0.9, "acousticness": 0.2, "instrumentalness": 0.1, "liveness": 0.3, "speechiness": 0.2, "tempo": 0.7},
+    "happy":          {"danceability": 0.8, "energy": 0.8, "valence": 0.7, "acousticness": 0.3, "instrumentalness": 0.1, "liveness": 0.7, "speechiness": 0.2, "tempo": 0.7},
     "sad":            {"danceability": 0.3, "energy": 0.3, "valence": 0.2, "acousticness": 0.7, "instrumentalness": 0.3, "liveness": 0.2, "speechiness": 0.2, "tempo": 0.4},
     "chill":          {"danceability": 0.5, "energy": 0.4, "valence": 0.5, "acousticness": 0.6, "instrumentalness": 0.6, "liveness": 0.3, "speechiness": 0.2, "tempo": 0.4},
     "party":          {"danceability": 0.9, "energy": 0.9, "valence": 0.8, "acousticness": 0.1, "instrumentalness": 0.1, "liveness": 0.4, "speechiness": 0.3, "tempo": 0.8},
@@ -105,7 +105,7 @@ for i, row in enumerate(top_tracks.itertuples(), start=1):
           f"(Genre: {row.track_genre}, Score: {row.mood_score:.3f})")
 
 
-# Example Spotify playlist (defined manually)
+# Example Spotify playlist (defined manually from spotify auto-generated playlist)
 spotify_happy_playlist = [
     {"track_name": "Brand New", "artist": "Ben Rector"},
     {"track_name": "I'm Yours", "artist": "Jason Mraz"},
